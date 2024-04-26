@@ -1,37 +1,39 @@
 from google.cloud import bigquery
 import requests
+import os
+from google.oauth2 import service_account
 from requests.auth import HTTPBasicAuth
 import json
-from creds import token, collins_url, SECRET, COLUMNS, PROJECT_ID, DEST_TABLE
+from creds import token, collins_url, COL_COLUMNS, PROJECT_ID, COL_DEST_TABLE, creds_file_path, collins_end_points
 
-# def send_to_bigquery(result_set):
-#     rows_to_insert = []
-#     # for i in result_set:
-#     #     for j in COLUMNS:
-#     #         rows_to_insert.append({j: i[0], u"transformed_address": i[1]})
-#
-#     errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
-#     if errors == []:
-#         print("New rows have been added.")
-#     else:
-#         print("Encountered errors while inserting rows: {}".format(errors))
-# pass
+def send_to_bigquery(result_set, page):
+    table_id = bigquery.Table.from_string(COL_DEST_TABLE)
+
+    errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
+    if errors == []:
+        print("Page: "+str(page)+' added to bigquery')
+    else:
+        client.close()
+        print("Encountered errors while inserting rows: {}".format(errors))
+pass
 
 
-def process_data(data):
+def process_data(data, endpoint, page):
     batch=[]
+    row = data[0]
+    cols = data[0].keys()
     # check if new columns exist
-    if len(COLUMNS)!= len(data[0].keys()):
+    if len(COL_COLUMNS)!= len(cols):
         print('Columns number mismatch between data and definition')
 
-    # for row in data:
-    #     row_hold=[]
-    #     for key in COLUMNS:
-    #         row_hold+=row[key]
-    #
-    #     batch+=row_hold
+    for row in data:
+        row_hold={}
+        for key in COL_COLUMNS:
+            row_hold[key]=str(row[key])
 
-    send_to_bigquery(data)
+        batch.append(row_hold)
+
+    send_to_bigquery(batch, page)
 
     return 0
     
@@ -54,36 +56,51 @@ def process_data(data):
 
 if __name__ == '__main__':
 
-    client = bigquery.Client(project=PROJECT_ID)
-    table_id = bigquery.Table.from_string(DEST_TABLE)
+    # gc creds
+    with open(creds_file_path) as source:
+        info = json.load(source)
+
+    credentials = service_account.Credentials.from_service_account_info(info)
+    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
 
     headers = {
         "Authorization": "Bearer "+token
     }
 
-    url = collins_url+"bookings"
+    for endpoint in collins_end_points:
+        url = collins_url+endpoint
+        page=1
 
-    response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers)
 
-    if response.status_code == 200:
-        data = response.json()
-        # Do something with the JSON data
-        print(data)
-    else:
-        print("Request failed with status code:", response.status_code)
+        if response.status_code == 200:
+            data = response.json()
+            # Do something with the JSON data
+            process_data(data, endpoint, page)
+        elif response.status_code == 429:
+            print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
 
-    process_data(data)
+        else:
+            print("Request failed with status code for endpoint: "+endpoint, response.status_code)
 
-    while 'next' in response.links.keys():
-        # get next link
-        next_link = response.links.get('next').get('url')
-        print(next_link)
-        response = response = requests.get(url, headers=headers)
-        data = json.loads(response.text)
 
-        process_data(data)
+        while 'next' in response.links.keys():
+            # get next link
+            next_link = response.links.get('next').get('url')
+            page=+1
+            response = requests.get(url, headers=headers)
 
-    client.close()
+            if response.status_code == 200:
+                data = response.json()
+                # Do something with the JSON data
+                process_data(data, endpoint, page)
+            elif response.status_code == 429:
+                print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
+
+            else:
+                print("Request failed with status code for endpoint: " + endpoint, response.status_code)
+
+        client.close()
 
 
 
