@@ -4,10 +4,10 @@ import os
 from google.oauth2 import service_account
 from requests.auth import HTTPBasicAuth
 import json
-from creds import token, collins_url, COL_COLUMNS, PROJECT_ID, COL_DEST_TABLE, creds_file_path, collins_end_points
+from creds import token, collins_url, COL_COLUMNS, PROJECT_ID, COL_DEST_TABLE_BOOKINGS, creds_file_path, collins_end_points
 
 def send_to_bigquery(result_set, page):
-    table_id = bigquery.Table.from_string(COL_DEST_TABLE)
+    table_id = bigquery.Table.from_string(COL_DEST_TABLE_BOOKINGS)
 
     errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
     if errors == []:
