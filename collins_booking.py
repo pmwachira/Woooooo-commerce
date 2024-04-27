@@ -4,17 +4,24 @@ import os
 from google.oauth2 import service_account
 from requests.auth import HTTPBasicAuth
 import json
-from creds import token, collins_url, COL_COLUMNS, PROJECT_ID, COL_DEST_TABLE_BOOKINGS, creds_file_path, collins_end_points
+from creds import token, collins_url, COL_COLUMNS_BOOKINGS,COL_COLUMNS_CUSTOMERS, PROJECT_ID, COL_DEST_TABLE_BOOKINGS, COL_DEST_TABLE_CUSTOMERS,  creds_file_path, collins_end_points
 
-def send_to_bigquery(result_set, page):
-    table_id = bigquery.Table.from_string(COL_DEST_TABLE_BOOKINGS)
+def send_to_bigquery(result_set,endpoint, page):
+    if endpoint=='bookings':
+        COL_DEST_TABLE = COL_DEST_TABLE_BOOKINGS
+    elif endpoint == 'customers':
+        COL_DEST_TABLE = COL_DEST_TABLE_CUSTOMERS
+    else:
+        COL_DEST_TABLE=''
+
+    table_id = bigquery.Table.from_string(COL_DEST_TABLE)
 
     errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
     if errors == []:
-        print("Page: "+str(page)+' added to bigquery')
+        print("Endpoint: "+endpoint+" Page: "+str(page)+' added to bigquery')
     else:
         client.close()
-        print("Encountered errors while inserting rows: {}".format(errors))
+        print("Endpoint: "+endpoint+" Page: "+str(page)+" Encountered errors while inserting rows: {}".format(errors))
 pass
 
 
@@ -22,9 +29,16 @@ def process_data(data, endpoint, page):
     batch=[]
     row = data[0]
     cols = data[0].keys()
+    if endpoint=='bookings':
+        COL_COLUMNS = COL_COLUMNS_BOOKINGS
+    elif endpoint == 'customers':
+        COL_COLUMNS = COL_COLUMNS_CUSTOMERS
+    else:
+        COL_COLUMNS=[]
+
     # check if new columns exist
     if len(COL_COLUMNS)!= len(cols):
-        print('Columns number mismatch between data and definition')
+        print("Endpoint: "+endpoint+' Columns number mismatch between data and definition')
 
     for row in data:
         row_hold={}
@@ -33,7 +47,7 @@ def process_data(data, endpoint, page):
 
         batch.append(row_hold)
 
-    send_to_bigquery(batch, page)
+    send_to_bigquery(batch, endpoint, page)
 
     return 0
     
@@ -74,9 +88,16 @@ if __name__ == '__main__':
         response = requests.get(url, headers=headers)
 
         if response.status_code == 200:
-            data = response.json()
+            data = response.json().get(endpoint)
             # Do something with the JSON data
             process_data(data, endpoint, page)
+
+            # if no requests remaining per current rate limit
+            rate_remain = response.headers.get('X-RateLimit-Remaining')
+            if rate_remain == 0:
+                rate_reset = response.headers.get('X-RateLimit-Reset')
+                print('Extractor waits until time: ', rate_reset)
+
         elif response.status_code == 429:
             print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
 
@@ -87,13 +108,18 @@ if __name__ == '__main__':
         while 'next' in response.links.keys():
             # get next link
             next_link = response.links.get('next').get('url')
-            page=+1
+            page+=1
             response = requests.get(url, headers=headers)
 
             if response.status_code == 200:
-                data = response.json()
+                data = response.json().get(endpoint)
                 # Do something with the JSON data
                 process_data(data, endpoint, page)
+                # if no requests remaining per current rate limit
+                rate_remain = response.headers.get('X-RateLimit-Remaining')
+                if rate_remain == 0:
+                    rate_reset = response.headers.get('X-RateLimit-Reset')
+                    print('Extractor waits until time: ', rate_reset)
             elif response.status_code == 429:
                 print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
 
