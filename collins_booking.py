@@ -1,57 +1,70 @@
+import time
+
 from google.cloud import bigquery
+from google.api_core.retry import Retry
 import requests
+from datetime import datetime, timedelta
 import os
 from google.oauth2 import service_account
 from requests.auth import HTTPBasicAuth
 import json
-from creds import token, collins_url, COL_COLUMNS_BOOKINGS,COL_COLUMNS_CUSTOMERS, PROJECT_ID, COL_DEST_TABLE_BOOKINGS, COL_DEST_TABLE_CUSTOMERS,  creds_file_path, collins_end_points
+from creds import token, collins_url, COL_COLUMNS_BOOKINGS, COL_COLUMNS_CUSTOMERS, PROJECT_ID, COL_DEST_TABLE_BOOKINGS, \
+    COL_DEST_TABLE_CUSTOMERS, creds_file_path, collins_end_points
 
-def send_to_bigquery(result_set,endpoint, page):
-    if endpoint=='bookings':
+
+def send_to_bigquery(result_set, endpoint, page):
+    if endpoint == 'bookings':
         COL_DEST_TABLE = COL_DEST_TABLE_BOOKINGS
     elif endpoint == 'customers':
         COL_DEST_TABLE = COL_DEST_TABLE_CUSTOMERS
     else:
-        COL_DEST_TABLE=''
+        COL_DEST_TABLE = ''
 
     table_id = bigquery.Table.from_string(COL_DEST_TABLE)
 
-    errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
+    errors = client.insert_rows_json(table_id, result_set, retry=Retry(deadline=240))  # Make an API request.
     if errors == []:
-        print("Endpoint: "+endpoint+" Page: "+str(page)+' added to bigquery')
+        print("Endpoint: " + endpoint + " Page: " + str(page) + ' added to bigquery')
     else:
         client.close()
-        print("Endpoint: "+endpoint+" Page: "+str(page)+" Encountered errors while inserting rows: {}".format(errors))
+        print("Endpoint: " + endpoint + " Page: " + str(page) + " Encountered errors while inserting rows: {}".format(
+            errors))
+
+
 pass
 
 
 def process_data(data, endpoint, page):
-    batch=[]
+    batch = []
     row = data[0]
     cols = data[0].keys()
-    if endpoint=='bookings':
+    if endpoint == 'bookings':
         COL_COLUMNS = COL_COLUMNS_BOOKINGS
     elif endpoint == 'customers':
         COL_COLUMNS = COL_COLUMNS_CUSTOMERS
     else:
-        COL_COLUMNS=[]
+        COL_COLUMNS = []
 
     # check if new columns exist
-    if len(COL_COLUMNS)!= len(cols):
-        print("Endpoint: "+endpoint+' Columns number mismatch between data and definition')
+    if len(COL_COLUMNS) != len(cols):
+        print("Endpoint: " + endpoint + ' Columns number mismatch between data and definition.')
 
     for row in data:
-        row_hold={}
+        row_hold = {}
         for key in COL_COLUMNS:
-            row_hold[key]=str(row[key])
+            # error check results
+            if key in row.keys():
+                row_hold[key] = str(row[key])
+            else:
+                row_hold[key] = ''
+
+        row_hold['ingested_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         batch.append(row_hold)
 
     send_to_bigquery(batch, endpoint, page)
 
     return 0
-    
-
 
 
 # def check_if_table_exists():
@@ -68,8 +81,8 @@ def process_data(data, endpoint, page):
 #     return table_id
 
 
-if __name__ == '__main__':
-
+def extract_data(days_batch=30):
+    global client
     # gc creds
     with open(creds_file_path) as source:
         info = json.load(source)
@@ -78,55 +91,92 @@ if __name__ == '__main__':
     client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
 
     headers = {
-        "Authorization": "Bearer "+token
+        "Authorization": "Bearer " + token
     }
 
+    from_date = datetime.strptime('2018-01-01', "%Y-%m-%d")
+    end_date = datetime.now()
+    to_date = from_date + timedelta(days=days_batch)
+    # extract data in batches of x days
     for endpoint in collins_end_points:
-        url = collins_url+endpoint
-        page=1
 
-        response = requests.get(url, headers=headers)
+        # collins_end_points.remove('bookings')
 
-        if response.status_code == 200:
-            data = response.json().get(endpoint)
-            # Do something with the JSON data
-            process_data(data, endpoint, page)
+        while to_date < end_date:
 
-            # if no requests remaining per current rate limit
-            rate_remain = response.headers.get('X-RateLimit-Remaining')
-            if rate_remain == 0:
-                rate_reset = response.headers.get('X-RateLimit-Reset')
-                print('Extractor waits until time: ', rate_reset)
+            time_range_filter = '?created_date_from=' + from_date.strftime(
+                "%Y-%m-%d") + '&created_date_to=' + to_date.strftime("%Y-%m-%d")
 
-        elif response.status_code == 429:
-            print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
+            initial_url = collins_url + endpoint + time_range_filter
 
-        else:
-            print("Request failed with status code for endpoint: "+endpoint, response.status_code)
-
-
-        while 'next' in response.links.keys():
-            # get next link
-            next_link = response.links.get('next').get('url')
-            page+=1
-            response = requests.get(url, headers=headers)
+            response = requests.get(initial_url, headers=headers)
 
             if response.status_code == 200:
                 data = response.json().get(endpoint)
-                # Do something with the JSON data
-                process_data(data, endpoint, page)
-                # if no requests remaining per current rate limit
                 rate_remain = response.headers.get('X-RateLimit-Remaining')
+                print('Url called: ', initial_url, 'Total Pages: ', response.headers.get('X-Pagination-Total-Pages'),
+                      'Total results: ', response.headers.get('X-Pagination-Total-Results'), ' Rate remaining: ',
+                      rate_remain)
+
+                if len(data) > 0:
+                    page = response.headers.get('X-Pagination-Page')
+                    # Do something with the JSON data
+                    process_data(data, endpoint, page)
+                    while 'next' in response.links.keys():
+                        # get next link
+                        # bug here, next doesnt give context url
+                        # next_link = response.links.get('next').get('url')
+                        next_link = initial_url + '&page=' + str(int(page) + 1)
+                        response = requests.get(next_link, headers=headers)
+                        page = response.headers.get('X-Pagination-Page')
+                        rate_remain = response.headers.get('X-RateLimit-Remaining')
+
+                        if response.status_code == 200:
+                            data = response.json().get(endpoint)
+                            if len(data) > 0:
+                                # Do something with the JSON data
+                                process_data(data, endpoint, page)
+                            else:
+                                print('No data in range: ' + from_date.strftime("%Y-%m-%d"),
+                                      ' -> ' + to_date.strftime("%Y-%m-%d"))
+                            # if no requests remaining per current rate limit
+                            rate_remain = response.headers.get('X-RateLimit-Remaining')
+
+                            if rate_remain == 0:
+                                rate_reset = response.headers.get('X-RateLimit-Reset')
+                                print('Extractor waits until time: ', rate_reset)
+                        elif response.status_code == 429:
+                            print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
+
+                        else:
+                            print(
+                                "Request failed with status code for endpoint: " + endpoint + from_date + '->' + to_date + '>>',
+                                response.status_code, response.text)
+
+
+
+                else:
+                    print('No data in range: ' + from_date.strftime("%Y-%m-%d"), ' -> ' + to_date.strftime("%Y-%m-%d"))
+
+                # if no requests remaining per current rate limit
+
                 if rate_remain == 0:
                     rate_reset = response.headers.get('X-RateLimit-Reset')
                     print('Extractor waits until time: ', rate_reset)
+
+
             elif response.status_code == 429:
                 print("Rate limit exceeded for endpoint: " + endpoint, response.status_code)
 
             else:
-                print("Request failed with status code for endpoint: " + endpoint, response.status_code)
+                print("Request failed with status code for endpoint: " + endpoint + from_date + '->' + to_date + '>>',
+                      response.status_code, response.text)
 
-        client.close()
+            # next batch params
+            from_date = to_date + timedelta(days=1)
+            to_date = from_date + timedelta(days=days_batch)
+    client.close()
 
 
-
+if __name__ == '__main__':
+    extract_data(7)
