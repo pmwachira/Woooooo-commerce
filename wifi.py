@@ -1,48 +1,39 @@
 from google.cloud import bigquery
-import urllib.parse
-import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 from google.oauth2 import service_account
-import requests
-from requests.auth import HTTPBasicAuth
 import json
-from creds import wifi_url_venues,wifi_url_visitors, wifi_domain, public_key, private_key, creds_file,  wifi_venue_cols,wifi_visitors_cols, WOO_COLUMNS_PRODUCTS, WOO_DEST_TABLE_CUSTOMERS, PROJECT_ID, WOO_DEST_TABLE_ORDERS, woo_endpoints
+from creds import wifi_url_venues,wifi_url_visitors, wifi_domain, public_key, private_key, creds_file,  wifi_venue_cols,wifi_visitors_cols, dest_wifi_venues, dest_wifi_visitors, PROJECT_ID
 import requests
-import hmac
-import hashlib
-import base64
-from datetime import datetime
-from email.utils import formatdate
-import hashlib
-import hmac
 import time
 import hashlib
 import hmac
 from datetime import datetime
 
-def send_to_bigquery(result_set, endpoint, page):
+def send_to_bigquery(id, result_set, endpoint):
     # dynamic table insert
+    venue_text=''
     # column checks
-    if endpoint == 'orders':
-        DEST_TABLE = DEST_TABLE_VENUES
-    elif endpoint == 'customers':
-        DEST_TABLE = WOO_DEST_TABLE_VISITOES
+    if endpoint == 'venues':
+        DEST_TABLE = dest_wifi_venues
+    elif endpoint == 'visitors':
+        venue_text = ' Venue: '+str(id)+' '
+        DEST_TABLE = dest_wifi_visitors
 
     else:
-        WOO_DEST_TABLE = []
+        DEST_TABLE = []
 
     table_id = bigquery.Table.from_string(DEST_TABLE)
-
+    errors = []
     errors = client.insert_rows_json(table_id, result_set)  # Make an API request.
 
     if errors == []:
-        print("Wifi Endpoint: "+endpoint+" Page:"+str(page)+" added to bigquery"+str(len(result_set)))
+        print("Wifi Endpoint: "+endpoint+venue_text+" Rows:"+str(len(result_set))+" added to bigquery")
     else:
-        print("Wifi Endpoint: "+endpoint+" Page:"+str(page) + " Encountered errors while inserting rows: {}".format(errors))
+        print("Wifi Endpoint: "+endpoint+venue_text+" Rows:"+str(len(result_set)) + " Encountered errors while inserting rows: {}".format(errors))
     return
 
 
-def process_data(data, endpoint):
+def process_data(id, data, endpoint):
     batch=[]
     venues=[]
     row = data[0]
@@ -56,8 +47,9 @@ def process_data(data, endpoint):
     else:
         COLUMNS = []
         # check if new columns exist
-    if len(COLUMNS)!= len(cols):
-        print('Columns number mismatch between data and definition for woo Endpoint: ', endpoint)
+    if len(COLUMNS)< len(cols):
+        print('Columns number mismatch between data and definition for wifi Endpoint: ', endpoint)
+        print(set(cols) - set(COLUMNS))
 
     for row in data:
         row_hold = {}
@@ -74,19 +66,18 @@ def process_data(data, endpoint):
 
         row_hold['ingested_at'] = ingested_at
 
-        # # todo remove unupdated customer data from population
-        # if endpoint == 'customers':
-        #     if datetime.strptime(row['date_created'],"%Y-%m-%dT%H:%M:%S") < datetime.now() - timedelta(days=days):
-        #         pass
-        #     else:
-        #         batch.append(row_hold)
-        # else:
-        #     batch.append(row_hold)
+        if endpoint == 'visitors':
+            row_hold['venue'] = id
+        batch.append(row_hold)
 
-    # if len(batch)>0:
-    #     send_to_bigquery(batch,endpoint)
-
-    return venues
+    if endpoint == 'venues':
+        if len(batch) > 0:
+            send_to_bigquery(id, batch, endpoint)
+        return venues
+    else:
+        if len(batch) > 0:
+            send_to_bigquery(id, batch, endpoint)
+        return
 
 
 def generate_signature(request_url, timestamp):
@@ -103,60 +94,7 @@ def generate_signature(request_url, timestamp):
 
     return timestamp, encrypted_signature
 
-
-def extract_data(days_ago=7):
-    global client, ingested_at, days
-    days = days_ago
-    ingested_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    modified_after = urllib.parse.unquote((datetime.now() - timedelta(days=days_ago)).isoformat())
-    filter = '&from=' + modified_after
-    filter = ''
-    # gc creds
-    info = json.loads(creds_file, strict=False)
-
-    credentials = service_account.Credentials.from_service_account_info(info)
-    client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
-
-    url = wifi_url_venues+ filter
-
-    page = 1
-
-    timestamp, signature = generate_signature()
-
-    headers = {
-        'X-API-Authorization': signature,
-        'Date': timestamp,
-        'Content-Type': 'application/json'
-    }
-
-    response = requests.get(f"{url}", headers=headers)
-
-    data = json.loads(response.text)
-
-    process_data(data, endpoint, page)
-
-    while 'next' in response.links.keys():
-        page += 1
-        # get next link
-        next_link = response.links.get('next').get('url')
-        response = requests.get(next_link, auth=HTTPBasicAuth(consumer_key, consumer_secret))
-        print('url called: ' + next_link)
-        data = json.loads(response.text)
-
-        process_data(data, endpoint, page)
-
-    print('Woocommerce extraction complete')
-    client.close()
-
-
-def get_venues(days):
-
-    modified_after = urllib.parse.unquote((datetime.now() - timedelta(days=days)).isoformat())
-    filter = '&from=' + modified_after
-    filter = ''
-
-    # url = wifi_url_venues + filter
+def get_venues():
 
     request_url = wifi_url_venues
     timestamp = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
@@ -173,7 +111,7 @@ def get_venues(days):
 
     data = (json.loads(response.text)).get('data').get('venues')
 
-    venues = process_data(data, 'venues')
+    venues = process_data(0, data, 'venues')
 
     return venues
 
@@ -181,41 +119,64 @@ def get_venues(days):
 def get_visitors(venues, days):
     for id in venues:
 
-        modified_after = urllib.parse.unquote((datetime.now() - timedelta(days=days)).isoformat())
-        filter = '&from=' + modified_after
-        filter = ''
+        from_ = datetime.today() - timedelta(days=days)
+        end_ = datetime.now()
+        to_ = from_ + timedelta(days=days)
 
-        request_url = wifi_url_visitors.format(id)
-        timestamp = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
+        while from_ <= end_:
+            from_str = from_.strftime('%Y%m%d')
+            to_str = to_.strftime('%Y%m%d')
 
-        timestamp, signature = generate_signature(request_url, timestamp)
+            filter = '?&from=' + from_str+'&to='+to_str
 
-        headers = {
-            'X-API-Authorization': signature,
-            'Date': timestamp,
-            'Content-Type': 'application/json'
-        }
+            request_url = wifi_url_visitors.format(id)+filter
+            timestamp = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
 
-        response = requests.get(f"{request_url}", headers=headers)
+            timestamp, signature = generate_signature(request_url, timestamp)
 
-        data = (json.loads(response.text)).get('data').get('visitors')
+            headers = {
+                'X-API-Authorization': signature,
+                'Date': timestamp,
+                'Content-Type': 'application/json'
+            }
 
-        visitors = process_data(data, 'visitors')
+            response = requests.get(f"{request_url}", headers=headers)
+            print('Called visitors url for venues: '+id + ' dates: '+ from_str+' to '+to_str)
+
+            try:
+                rsp = json.loads(response.text)
+                data = rsp.get('data')
+                visitors = data.get('visitors')
+                if len(visitors)>0:
+                    process_data(id, visitors, 'visitors')
+            except Exception as e:
+                print(e,' -> ',response.text[0:300])
+
+            from_ = to_
+            to_ = from_ + timedelta(days=days)
+            if to_>datetime.now():
+                to_=datetime.now()
+
+
     pass
 
-
-if __name__ == '__main__':
-    global client, ingested_at, days
+def get_wifi_data(days=2):
+    global client, ingested_at, debug
+    debug = True
     days = 2
     info = json.loads(creds_file, strict=False)
     credentials = service_account.Credentials.from_service_account_info(info)
     client = bigquery.Client(project=PROJECT_ID, credentials=credentials)
-    ingested_at = ingested_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ingested_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    venue_list = get_venues(days)
+    venue_list = get_venues()
 
     get_visitors(venue_list, days)
 
     print('Wifi data extraction complete')
     client.close()
+
+if __name__ == '__main__':
+    get_wifi_data(2)
+
 
